@@ -1,0 +1,17 @@
+{
+  "name": "mini-commander-rewrite",
+  "version": "0.1.0",
+  "description": "A focused rewrite of commander.js for competition milestones.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test",
+    "example": "node examples/string-util.js split --separator=/ a/b/c"
+  },
+  "keywords": [
+    "cli",
+    "commander",
+    "rewrite"
+  ],
+  "license": "MIT"
+}
