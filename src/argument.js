@@ -3,7 +3,7 @@ export class ArgumentDefinition {
     this.spec = spec.trim();
     this.description = description;
     this.required = this.spec.startsWith("<");
-    this.variadic = this.spec.endsWith("...");
+    this.variadic = this.spec.includes("...");
     this.name = this.spec
       .replace(/^\[|^</, "")
       .replace(/]$|>$/, "")

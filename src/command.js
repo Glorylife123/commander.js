@@ -23,6 +23,10 @@ function cloneDefault(option) {
   return option.defaultValue;
 }
 
+function isOptionToken(value) {
+  return typeof value === "string" && value.startsWith("-") && value !== "-";
+}
+
 export class Command {
   constructor(name = "") {
     this._name = name;
@@ -33,6 +37,7 @@ export class Command {
     this._options = [];
     this._commands = [];
     this._action = null;
+    this._aliases = [];
     this._parent = null;
     this.args = [];
     this.rawArgs = [];
@@ -51,6 +56,13 @@ export class Command {
 
   summary(value) {
     this._summary = value;
+    return this;
+  }
+
+  alias(value) {
+    if (!this._aliases.includes(value)) {
+      this._aliases.push(value);
+    }
     return this;
   }
 
@@ -117,7 +129,15 @@ export class Command {
     this._resetState();
     const userArgs = normalizeArgv(argv, config.from);
     this.rawArgs = [...userArgs];
-    this._parseTokens(userArgs);
+    this._parseTokensSync(userArgs);
+    return this;
+  }
+
+  async parseAsync(argv, config = {}) {
+    this._resetState();
+    const userArgs = normalizeArgv(argv, config.from);
+    this.rawArgs = [...userArgs];
+    await this._parseTokensAsync(userArgs);
     return this;
   }
 
@@ -130,7 +150,8 @@ export class Command {
 
   _commandSignature() {
     const argumentsPart = this._arguments.map((argument) => argument.spec).join(" ");
-    return [this._name, argumentsPart].filter(Boolean).join(" ");
+    const aliasPart = this._aliases.length ? `|${this._aliases.join("|")}` : "";
+    return [`${this._name}${aliasPart}`, argumentsPart].filter(Boolean).join(" ");
   }
 
   _helpOptions() {
@@ -160,7 +181,7 @@ export class Command {
     }
   }
 
-  _parseTokens(tokens) {
+  _parseTokensSync(tokens) {
     let index = 0;
     const positional = [];
 
@@ -174,10 +195,13 @@ export class Command {
         this.outputHelp();
         return;
       }
-      const subcommand = this._commands.find((command) => command._name === token);
+      const subcommand = this._commands.find((command) =>
+        command._name === token || command._aliases.includes(token)
+      );
       if (subcommand) {
         subcommand.parse(tokens.slice(index + 1), { from: "user" });
         this.args = subcommand.args;
+        this._optionValues = { ...subcommand.opts() };
         return;
       }
       if (token.startsWith("-")) {
@@ -195,8 +219,49 @@ export class Command {
     }
   }
 
+  async _parseTokensAsync(tokens) {
+    let index = 0;
+    const positional = [];
+
+    while (index < tokens.length) {
+      const token = tokens[index];
+      if (token === "--") {
+        positional.push(...tokens.slice(index + 1));
+        break;
+      }
+      if (token === "-h" || token === "--help") {
+        this.outputHelp();
+        return;
+      }
+      const subcommand = this._commands.find((command) =>
+        command._name === token || command._aliases.includes(token)
+      );
+      if (subcommand) {
+        await subcommand.parseAsync(tokens.slice(index + 1), { from: "user" });
+        this.args = subcommand.args;
+        this._optionValues = { ...subcommand.opts() };
+        return;
+      }
+      if (token.startsWith("-")) {
+        index = this._consumeOption(tokens, index);
+      } else {
+        positional.push(token);
+        index += 1;
+      }
+    }
+
+    this._applyArguments(positional);
+    this._validateRequiredOptions();
+    if (this._action) {
+      await this._action(...this.args, this.opts(), this);
+    }
+  }
+
   _consumeOption(tokens, startIndex) {
     const token = tokens[startIndex];
+    if (/^-[^-]{2,}/.test(token) && !token.includes("=")) {
+      return this._consumeCombinedShortOptions(tokens, startIndex);
+    }
     const [flagToken, inlineValue] = token.split(/=(.*)/s, 2);
     const option = this._options.find((item) => item.matches(flagToken));
     if (!option) {
@@ -219,7 +284,7 @@ export class Command {
     }
 
     const next = tokens[startIndex + 1];
-    if (next === undefined || next.startsWith("-")) {
+    if (next === undefined || isOptionToken(next)) {
       if (option.valueOptional) {
         this._optionValues[option.name] = true;
         this._runOptionHandler(option.name);
@@ -231,6 +296,48 @@ export class Command {
     this._optionValues[option.name] = next;
     this._runOptionHandler(option.name);
     return startIndex + 2;
+  }
+
+  _consumeCombinedShortOptions(tokens, startIndex) {
+    const token = tokens[startIndex];
+    const shortFlags = token.slice(1).split("");
+
+    for (let index = 0; index < shortFlags.length; index += 1) {
+      const shortFlag = shortFlags[index];
+      const option = this._options.find((item) => item.isShortFlag(shortFlag));
+      if (!option) {
+        throw new Error(`Unknown option: -${shortFlag}`);
+      }
+
+      if (option.boolean) {
+        this._optionValues[option.name] = true;
+        this._runOptionHandler(option.name);
+        continue;
+      }
+
+      const rest = shortFlags.slice(index + 1).join("");
+      if (rest) {
+        this._optionValues[option.name] = rest;
+        this._runOptionHandler(option.name);
+        return startIndex + 1;
+      }
+
+      const next = tokens[startIndex + 1];
+      if (next === undefined || isOptionToken(next)) {
+        if (option.valueOptional) {
+          this._optionValues[option.name] = true;
+          this._runOptionHandler(option.name);
+          return startIndex + 1;
+        }
+        throw new Error(`Option ${option.short} expects a value.`);
+      }
+
+      this._optionValues[option.name] = next;
+      this._runOptionHandler(option.name);
+      return startIndex + 2;
+    }
+
+    return startIndex + 1;
   }
 
   _runOptionHandler(optionName) {

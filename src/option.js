@@ -31,4 +31,8 @@ export class OptionDefinition {
   matches(token) {
     return token === this.short || token === this.long;
   }
+
+  isShortFlag(token) {
+    return Boolean(this.short) && token === this.short.replace(/^-/, "");
+  }
 }

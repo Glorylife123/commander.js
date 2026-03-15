@@ -15,8 +15,12 @@ The current rewrite covers the main flow needed for common command-line tools:
 - command registration
 - positional arguments
 - boolean and value options
+- optional option values
 - required options
 - subcommands
+- command aliases
+- async action handlers via `parseAsync()`
+- combined short flags like `-alh`
 - automatic help text
 - action handlers
 - basic validation errors
@@ -32,6 +36,7 @@ src/
   option.js
   utils.js
 examples/
+  release.js
   string-util.js
 tests/
   command.test.js
@@ -42,6 +47,7 @@ tests/
 ```bash
 npm test
 node examples/string-util.js split --separator=/ a/b/c
+node examples/release.js ship app.tar.gz -t abc123 --env=staging
 ```
 
 ## Rewrite mapping
@@ -52,14 +58,14 @@ This rewrite currently targets the following upstream capabilities:
 - `.command()`
 - `.argument()`
 - `.option()` / `.requiredOption()`
+- `.alias()`
 - `.action()`
-- `.parse()`
+- `.parse()` / `.parseAsync()`
 - generated help output
 
 Planned next steps:
 
-- optional option values
-- command aliases
 - custom value processors
-- async actions
 - richer error formatting
+- standalone executable subcommands
+- suggestion and compatibility behaviors
