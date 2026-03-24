@@ -13,6 +13,7 @@ export class OptionDefinition {
     this.description = description;
     this.required = Boolean(config.required);
     this.defaultValue = config.defaultValue;
+    this.parser = config.parser ?? null;
 
     const parts = splitFlags(flags);
     this.short = parts.find((part) => part.startsWith("-") && !part.startsWith("--"));
@@ -34,5 +35,18 @@ export class OptionDefinition {
 
   isShortFlag(token) {
     return Boolean(this.short) && token === this.short.replace(/^-/, "");
+  }
+
+  parseValue(value, previousValue) {
+    if (!this.parser) {
+      return value;
+    }
+
+    try {
+      return this.parser(value, previousValue);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid value for option ${this.long ?? this.short}: ${detail}`);
+    }
   }
 }

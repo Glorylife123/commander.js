@@ -1,6 +1,7 @@
 import { ArgumentDefinition } from "./argument.js";
 import { HelpRenderer } from "./help.js";
 import { OptionDefinition } from "./option.js";
+import { suggestClosest } from "./utils.js";
 
 function normalizeArgv(argv, from = "node") {
   if (!argv) {
@@ -79,13 +80,21 @@ export class Command {
   }
 
   option(flags, description = "", defaultValue) {
-    this._options.push(new OptionDefinition(flags, description, { defaultValue }));
+    const { parser, resolvedDefaultValue } = this._normalizeOptionConfig(defaultValue, arguments[3]);
+    this._options.push(
+      new OptionDefinition(flags, description, { defaultValue: resolvedDefaultValue, parser })
+    );
     return this;
   }
 
   requiredOption(flags, description = "", defaultValue) {
+    const { parser, resolvedDefaultValue } = this._normalizeOptionConfig(defaultValue, arguments[3]);
     this._options.push(
-      new OptionDefinition(flags, description, { required: true, defaultValue })
+      new OptionDefinition(flags, description, {
+        required: true,
+        defaultValue: resolvedDefaultValue,
+        parser
+      })
     );
     return this;
   }
@@ -201,12 +210,12 @@ export class Command {
       if (subcommand) {
         subcommand.parse(tokens.slice(index + 1), { from: "user" });
         this.args = subcommand.args;
-        this._optionValues = { ...subcommand.opts() };
         return;
       }
       if (token.startsWith("-")) {
         index = this._consumeOption(tokens, index);
       } else {
+        this._throwForUnknownCommand(token, positional.length);
         positional.push(token);
         index += 1;
       }
@@ -239,12 +248,12 @@ export class Command {
       if (subcommand) {
         await subcommand.parseAsync(tokens.slice(index + 1), { from: "user" });
         this.args = subcommand.args;
-        this._optionValues = { ...subcommand.opts() };
         return;
       }
       if (token.startsWith("-")) {
         index = this._consumeOption(tokens, index);
       } else {
+        this._throwForUnknownCommand(token, positional.length);
         positional.push(token);
         index += 1;
       }
@@ -265,20 +274,20 @@ export class Command {
     const [flagToken, inlineValue] = token.split(/=(.*)/s, 2);
     const option = this._options.find((item) => item.matches(flagToken));
     if (!option) {
-      throw new Error(`Unknown option: ${token}`);
+      throw new Error(this._unknownOptionMessage(token));
     }
 
     if (option.boolean) {
       if (inlineValue !== undefined) {
         throw new Error(`Option ${flagToken} does not take a value.`);
       }
-      this._optionValues[option.name] = true;
+      this._setOptionValue(option, true);
       this._runOptionHandler(option.name);
       return startIndex + 1;
     }
 
     if (inlineValue !== undefined) {
-      this._optionValues[option.name] = inlineValue;
+      this._setOptionValue(option, inlineValue);
       this._runOptionHandler(option.name);
       return startIndex + 1;
     }
@@ -286,14 +295,14 @@ export class Command {
     const next = tokens[startIndex + 1];
     if (next === undefined || isOptionToken(next)) {
       if (option.valueOptional) {
-        this._optionValues[option.name] = true;
+        this._setOptionValue(option, true);
         this._runOptionHandler(option.name);
         return startIndex + 1;
       }
       throw new Error(`Option ${token} expects a value.`);
     }
 
-    this._optionValues[option.name] = next;
+    this._setOptionValue(option, next);
     this._runOptionHandler(option.name);
     return startIndex + 2;
   }
@@ -306,18 +315,18 @@ export class Command {
       const shortFlag = shortFlags[index];
       const option = this._options.find((item) => item.isShortFlag(shortFlag));
       if (!option) {
-        throw new Error(`Unknown option: -${shortFlag}`);
+        throw new Error(this._unknownOptionMessage(`-${shortFlag}`));
       }
 
       if (option.boolean) {
-        this._optionValues[option.name] = true;
+        this._setOptionValue(option, true);
         this._runOptionHandler(option.name);
         continue;
       }
 
       const rest = shortFlags.slice(index + 1).join("");
       if (rest) {
-        this._optionValues[option.name] = rest;
+        this._setOptionValue(option, rest);
         this._runOptionHandler(option.name);
         return startIndex + 1;
       }
@@ -325,14 +334,14 @@ export class Command {
       const next = tokens[startIndex + 1];
       if (next === undefined || isOptionToken(next)) {
         if (option.valueOptional) {
-          this._optionValues[option.name] = true;
+          this._setOptionValue(option, true);
           this._runOptionHandler(option.name);
           return startIndex + 1;
         }
         throw new Error(`Option ${option.short} expects a value.`);
       }
 
-      this._optionValues[option.name] = next;
+      this._setOptionValue(option, next);
       this._runOptionHandler(option.name);
       return startIndex + 2;
     }
@@ -343,6 +352,44 @@ export class Command {
   _runOptionHandler(optionName) {
     const handler = this._optionHandlers?.get(optionName);
     if (handler) handler();
+  }
+
+  _normalizeOptionConfig(parserOrDefaultValue, explicitDefaultValue) {
+    if (typeof parserOrDefaultValue === "function") {
+      return {
+        parser: parserOrDefaultValue,
+        resolvedDefaultValue: explicitDefaultValue
+      };
+    }
+
+    return {
+      parser: null,
+      resolvedDefaultValue: parserOrDefaultValue
+    };
+  }
+
+  _setOptionValue(option, rawValue) {
+    const previousValue = this._optionValues[option.name];
+    this._optionValues[option.name] = option.parseValue(rawValue, previousValue);
+  }
+
+  _unknownOptionMessage(token) {
+    const candidates = this._options.flatMap((option) => [option.short, option.long].filter(Boolean));
+    const suggestion = suggestClosest(token, candidates);
+    return suggestion
+      ? `Unknown option: ${token} (Did you mean ${suggestion}?)`
+      : `Unknown option: ${token}`;
+  }
+
+  _throwForUnknownCommand(token, positionalCount) {
+    if (positionalCount > 0 || this._arguments.length > 0 || this._commands.length === 0) {
+      return;
+    }
+
+    const candidates = this._commands.flatMap((command) => [command._name, ...command._aliases]);
+    const suggestion = suggestClosest(token, candidates);
+    const suffix = suggestion ? ` (Did you mean ${suggestion}?)` : "";
+    throw new Error(`Unknown command: ${token}${suffix}`);
   }
 
   _applyArguments(values) {

@@ -117,12 +117,59 @@ test("supports parseAsync with async action handlers", async () => {
   assert.equal(result, "echo:hello");
 });
 
+test("supports custom option processing with default accumulation", () => {
+  const program = new Command().option(
+    "-n, --number <value>",
+    "collect a running total",
+    (value, previous = 0) => previous + Number(value),
+    0
+  );
+
+  program.parse(["-n", "2", "--number=3"], { from: "user" });
+
+  assert.deepEqual(program.opts(), { number: 5 });
+});
+
+test("preserves parent option values when dispatching to subcommands", () => {
+  let subcommandOptions = null;
+  const program = new Command().option("-v, --verbose", "verbose output");
+
+  program
+    .command("run")
+    .option("--dry-run", "skip writes")
+    .action((options) => {
+      subcommandOptions = options;
+    });
+
+  program.parse(["--verbose", "run", "--dry-run"], { from: "user" });
+
+  assert.deepEqual(program.opts(), { verbose: true });
+  assert.deepEqual(subcommandOptions, { dryRun: true });
+});
+
 test("throws for unknown options", () => {
   const program = new Command().option("--first");
 
   assert.throws(() => {
     program.parse(["--missing"], { from: "user" });
-  }, /Unknown option/);
+  }, /Unknown option: --missing/);
+});
+
+test("suggests similar options for unknown options", () => {
+  const program = new Command().option("--first");
+
+  assert.throws(() => {
+    program.parse(["--firts"], { from: "user" });
+  }, /Did you mean --first\?/);
+});
+
+test("suggests similar subcommands for unknown commands", () => {
+  const program = new Command().name("demo");
+  program.command("split");
+
+  assert.throws(() => {
+    program.parse(["splti"], { from: "user" });
+  }, /Unknown command: splti \(Did you mean split\?\)/);
 });
 
 test("throws for missing required option", () => {
