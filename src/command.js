@@ -53,6 +53,7 @@ export class Command {
     this._helpFlags = "-h, --help";
     this._helpDescription = "display help for command";
     this._showHelpAfterError = false;
+    this._isDefault = false;
   }
 
   name(value) {
@@ -97,7 +98,7 @@ export class Command {
 
   helpOption(flags, description = "display help for command") {
     this._helpFlags = flags;
-    this._helpDescription = description;
+    this._helpDescription = flags === false ? this._helpDescription : description;
     return this;
   }
 
@@ -126,22 +127,24 @@ export class Command {
     return this;
   }
 
-  command(spec) {
+  command(spec, config = {}) {
     const [name, ...argSpecs] = spec.trim().split(/\s+/);
     const command = new Command(name);
     command._parent = this;
     for (const argSpec of argSpecs) {
       command.argument(argSpec);
     }
+    this._applyCommandConfig(command, config);
     this._commands.push(command);
     return command;
   }
 
-  addCommand(command) {
+  addCommand(command, config = {}) {
     if (!(command instanceof Command)) {
       throw new Error("addCommand() expects a Command instance.");
     }
     command._parent = this;
+    this._applyCommandConfig(command, config);
     this._commands.push(command);
     return this;
   }
@@ -223,9 +226,10 @@ export class Command {
         (option.defaultValue !== undefined ? ` (default: ${JSON.stringify(option.defaultValue)})` : "") +
         (option.required ? " (required)" : "")
     }));
-    if (this._helpFlags) {
+    const effectiveHelpFlags = this._effectiveHelpFlags();
+    if (effectiveHelpFlags) {
       rows.push({
-        term: this._helpFlags,
+        term: effectiveHelpFlags,
         description: this._helpDescription
       });
     }
@@ -259,6 +263,12 @@ export class Command {
         this.outputHelp();
         return;
       }
+      if (index === 0 && this._shouldDispatchToDefaultCommand(tokens)) {
+        const defaultCommand = this._defaultCommand();
+        defaultCommand.parse(tokens, { from: "user" });
+        this.args = defaultCommand.args;
+        return;
+      }
       const subcommand = this._commands.find((command) =>
         command._name === token || command._aliases.includes(token)
       );
@@ -274,6 +284,10 @@ export class Command {
         positional.push(token);
         index += 1;
       }
+    }
+
+    if (this._tryDefaultCommandSync(positional)) {
+      return;
     }
 
     this._applyArguments(positional);
@@ -297,6 +311,12 @@ export class Command {
         this.outputHelp();
         return;
       }
+      if (index === 0 && this._shouldDispatchToDefaultCommand(tokens)) {
+        const defaultCommand = this._defaultCommand();
+        await defaultCommand.parseAsync(tokens, { from: "user" });
+        this.args = defaultCommand.args;
+        return;
+      }
       const subcommand = this._commands.find((command) =>
         command._name === token || command._aliases.includes(token)
       );
@@ -312,6 +332,10 @@ export class Command {
         positional.push(token);
         index += 1;
       }
+    }
+
+    if (await this._tryDefaultCommandAsync(positional)) {
+      return;
     }
 
     this._applyArguments(positional);
@@ -426,6 +450,65 @@ export class Command {
     if (handler) handler();
   }
 
+  _applyCommandConfig(command, config) {
+    if (config?.isDefault) {
+      command._isDefault = true;
+    }
+  }
+
+  _defaultCommand() {
+    return this._commands.find((command) => command._isDefault);
+  }
+
+  _canUseDefaultCommand(positional) {
+    return Boolean(
+      this._defaultCommand() &&
+      this._arguments.length === 0 &&
+      this._action === null &&
+      (positional.length > 0 || this._commands.length > 0)
+    );
+  }
+
+  _shouldDispatchToDefaultCommand(tokens) {
+    const defaultCommand = this._defaultCommand();
+    if (!defaultCommand || this._arguments.length > 0 || this._action !== null || this._options.length > 0) {
+      return false;
+    }
+
+    const firstNonOption = tokens.find((token) => token !== "--" && !isOptionToken(token));
+    if (!firstNonOption) {
+      return true;
+    }
+
+    return !this._commands.some(
+      (command) =>
+        command !== defaultCommand &&
+        (command._name === firstNonOption || command._aliases.includes(firstNonOption))
+    );
+  }
+
+  _tryDefaultCommandSync(positional) {
+    if (!this._canUseDefaultCommand(positional)) {
+      return false;
+    }
+
+    const defaultCommand = this._defaultCommand();
+    defaultCommand.parse(positional, { from: "user" });
+    this.args = defaultCommand.args;
+    return true;
+  }
+
+  async _tryDefaultCommandAsync(positional) {
+    if (!this._canUseDefaultCommand(positional)) {
+      return false;
+    }
+
+    const defaultCommand = this._defaultCommand();
+    await defaultCommand.parseAsync(positional, { from: "user" });
+    this.args = defaultCommand.args;
+    return true;
+  }
+
   _consumeVariadicOption(option, tokens, startIndex, flagToken) {
     const collectedValues = [];
     let index = startIndex + 1;
@@ -475,11 +558,33 @@ export class Command {
   }
 
   _isHelpToken(token) {
-    if (!this._helpFlags) {
+    const effectiveHelpFlags = this._effectiveHelpFlags();
+    if (!effectiveHelpFlags) {
       return false;
     }
-    const helpOption = new OptionDefinition(this._helpFlags, this._helpDescription);
+    const helpOption = new OptionDefinition(effectiveHelpFlags, this._helpDescription);
     return helpOption.matches(token);
+  }
+
+  _effectiveHelpFlags() {
+    if (!this._helpFlags) {
+      return null;
+    }
+
+    const helpOption = new OptionDefinition(this._helpFlags, this._helpDescription);
+    const conflictingFlags = new Set(
+      this._options.flatMap((option) => [option.short, option.long]).filter(Boolean)
+    );
+
+    const effectiveFlags = [helpOption.short, helpOption.long].filter(
+      (flag) => flag && !conflictingFlags.has(flag)
+    );
+
+    if (effectiveFlags.length === 0) {
+      return null;
+    }
+
+    return effectiveFlags.join(", ");
   }
 
   _formatRuntimeError(error) {
@@ -511,7 +616,12 @@ export class Command {
   }
 
   _throwForUnknownCommand(token, positionalCount) {
-    if (positionalCount > 0 || this._arguments.length > 0 || this._commands.length === 0) {
+    if (
+      positionalCount > 0 ||
+      this._arguments.length > 0 ||
+      this._commands.length === 0 ||
+      (this._defaultCommand() && this._action === null && this._arguments.length === 0)
+    ) {
       return;
     }
 

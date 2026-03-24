@@ -59,6 +59,13 @@ node examples/string-util.js split --list a b c
 node examples/release.js ship app.tar.gz build-17 -t abc123 --tag stable beta --no-color
 ```
 
+## Final defense entry
+
+If you are preparing for the final presentation, start here:
+
+- `FINAL_DEFENSE.md`: final capability summary, completion estimate, and suggested defense wording
+- `DEMO_SCRIPT.md`: runnable demo order, commands, expected output, and speaking prompts
+
 ## Rewrite mapping
 
 This rewrite currently targets the following upstream capabilities:

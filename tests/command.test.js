@@ -33,6 +33,22 @@ test("supports subcommands with actions", () => {
   assert.deepEqual(result, ["a"]);
 });
 
+test("supports default subcommands declared with command()", () => {
+  let result = null;
+
+  const program = new Command().name("string-util");
+  program
+    .command("split <input>", { isDefault: true })
+    .option("-s, --separator <char>", "separator", ",")
+    .action((input, options) => {
+      result = input.split(options.separator);
+    });
+
+  program.parse(["a/b/c", "-s", "/"], { from: "user" });
+
+  assert.deepEqual(result, ["a", "b", "c"]);
+});
+
 test("supports addCommand with preconfigured subcommands", () => {
   let result = null;
 
@@ -52,6 +68,25 @@ test("supports addCommand with preconfigured subcommands", () => {
   assert.deepEqual(result, ["a"]);
 });
 
+test("supports default subcommands declared with addCommand()", () => {
+  let result = null;
+
+  const split = new Command("split")
+    .argument("<input>")
+    .option("--first", "first only")
+    .option("-s, --separator <char>", "separator", ",")
+    .action((input, options) => {
+      const limit = options.first ? 1 : undefined;
+      result = input.split(options.separator, limit);
+    });
+
+  const program = new Command().name("string-util").addCommand(split, { isDefault: true });
+
+  program.parse(["a/b/c", "--first", "-s", "/"], { from: "user" });
+
+  assert.deepEqual(result, ["a"]);
+});
+
 test("supports command aliases", () => {
   let result = null;
   const program = new Command().name("string-util");
@@ -67,6 +102,28 @@ test("supports command aliases", () => {
   program.parse(["sp", "-s", "/", "a/b/c"], { from: "user" });
 
   assert.deepEqual(result, ["a", "b", "c"]);
+});
+
+test("prefers explicit subcommand over default subcommand", () => {
+  let defaultResult = 0;
+  let explicitResult = 0;
+
+  const program = new Command().name("demo");
+  program
+    .command("serve", { isDefault: true })
+    .action(() => {
+      defaultResult += 1;
+    });
+  program
+    .command("build")
+    .action(() => {
+      explicitResult += 1;
+    });
+
+  program.parse(["build"], { from: "user" });
+
+  assert.equal(defaultResult, 0);
+  assert.equal(explicitResult, 1);
 });
 
 test("supports long option inline values", () => {
@@ -319,6 +376,55 @@ test("supports custom help option flags", () => {
   const help = program.helpInformation();
 
   assert.match(help, /-H, --HELP/);
+});
+
+test("falls back to --help when -h is used by a custom option", () => {
+  const program = new Command()
+    .name("demo")
+    .option("-h, --human", "human readable")
+    .option("--first", "first only");
+
+  program.parse(["-h"], { from: "user" });
+  assert.deepEqual(program.opts(), { human: true });
+
+  const help = program.helpInformation();
+  assert.doesNotMatch(help, /-h, --help/);
+  assert.match(help, /--help\s+display help for command/);
+});
+
+test("falls back to -h when --help is used by a custom option", () => {
+  const program = new Command()
+    .name("demo")
+    .option("--help", "custom help option")
+    .option("--first", "first only");
+
+  const help = program.helpInformation();
+  assert.doesNotMatch(help, /-h, --help/);
+  assert.match(help, /-h\s+display help for command/);
+});
+
+test("disables built-in help when both -h and --help are used by custom options", () => {
+  const program = new Command()
+    .name("demo")
+    .option("-h, --human", "human readable")
+    .option("--help", "custom help option");
+
+  const help = program.helpInformation();
+  assert.doesNotMatch(help, /display help for command/);
+});
+
+test("supports disabling built-in help with helpOption(false)", () => {
+  const program = new Command()
+    .name("demo")
+    .helpOption(false)
+    .option("--first", "first only");
+
+  const help = program.helpInformation();
+  assert.doesNotMatch(help, /display help for command/);
+
+  assert.throws(() => {
+    program.parse(["--help"], { from: "user" });
+  }, /error: Unknown option: --help/);
 });
 
 test("shows help after errors when configured", () => {
