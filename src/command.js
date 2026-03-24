@@ -15,17 +15,23 @@ function normalizeArgv(argv, from = "node") {
   throw new Error(`Unsupported parse source: ${from}`);
 }
 
-function cloneDefault(option) {
-  if (option.defaultValue === undefined) return undefined;
-  if (Array.isArray(option.defaultValue)) return [...option.defaultValue];
-  if (option.defaultValue && typeof option.defaultValue === "object") {
-    return { ...option.defaultValue };
+function cloneDefaultValue(definition) {
+  if (definition.defaultValue === undefined) return undefined;
+  if (Array.isArray(definition.defaultValue)) return [...definition.defaultValue];
+  if (definition.defaultValue && typeof definition.defaultValue === "object") {
+    return { ...definition.defaultValue };
   }
-  return option.defaultValue;
+  return definition.defaultValue;
 }
 
 function isOptionToken(value) {
-  return typeof value === "string" && value.startsWith("-") && value !== "-";
+  if (typeof value !== "string" || value === "-") {
+    return false;
+  }
+  if (/^-\d+(\.\d+)?$/.test(value)) {
+    return false;
+  }
+  return value.startsWith("-");
 }
 
 export class Command {
@@ -42,7 +48,11 @@ export class Command {
     this._parent = null;
     this.args = [];
     this.rawArgs = [];
+    this.processedArgs = [];
     this._optionValues = {};
+    this._helpFlags = "-h, --help";
+    this._helpDescription = "display help for command";
+    this._showHelpAfterError = false;
   }
 
   name(value) {
@@ -74,13 +84,30 @@ export class Command {
     });
   }
 
-  argument(spec, description = "") {
-    this._arguments.push(new ArgumentDefinition(spec, description));
+  argument(spec, description = "", defaultValue) {
+    const { parser, resolvedDefaultValue } = this._normalizeValueConfig(defaultValue, arguments[3]);
+    this._arguments.push(
+      new ArgumentDefinition(spec, description, {
+        defaultValue: resolvedDefaultValue,
+        parser
+      })
+    );
+    return this;
+  }
+
+  helpOption(flags, description = "display help for command") {
+    this._helpFlags = flags;
+    this._helpDescription = description;
+    return this;
+  }
+
+  showHelpAfterError(displayHelp = true) {
+    this._showHelpAfterError = displayHelp;
     return this;
   }
 
   option(flags, description = "", defaultValue) {
-    const { parser, resolvedDefaultValue } = this._normalizeOptionConfig(defaultValue, arguments[3]);
+    const { parser, resolvedDefaultValue } = this._normalizeValueConfig(defaultValue, arguments[3]);
     this._options.push(
       new OptionDefinition(flags, description, { defaultValue: resolvedDefaultValue, parser })
     );
@@ -88,7 +115,7 @@ export class Command {
   }
 
   requiredOption(flags, description = "", defaultValue) {
-    const { parser, resolvedDefaultValue } = this._normalizeOptionConfig(defaultValue, arguments[3]);
+    const { parser, resolvedDefaultValue } = this._normalizeValueConfig(defaultValue, arguments[3]);
     this._options.push(
       new OptionDefinition(flags, description, {
         required: true,
@@ -108,6 +135,23 @@ export class Command {
     }
     this._commands.push(command);
     return command;
+  }
+
+  addCommand(command) {
+    if (!(command instanceof Command)) {
+      throw new Error("addCommand() expects a Command instance.");
+    }
+    command._parent = this;
+    this._commands.push(command);
+    return this;
+  }
+
+  arguments(specs) {
+    const argSpecs = specs.trim().split(/\s+/).filter(Boolean);
+    for (const argSpec of argSpecs) {
+      this.argument(argSpec);
+    }
+    return this;
   }
 
   action(handler) {
@@ -135,18 +179,26 @@ export class Command {
   }
 
   parse(argv, config = {}) {
-    this._resetState();
-    const userArgs = normalizeArgv(argv, config.from);
-    this.rawArgs = [...userArgs];
-    this._parseTokensSync(userArgs);
+    try {
+      this._resetState();
+      const userArgs = normalizeArgv(argv, config.from);
+      this.rawArgs = [...userArgs];
+      this._parseTokensSync(userArgs);
+    } catch (error) {
+      throw this._formatRuntimeError(error);
+    }
     return this;
   }
 
   async parseAsync(argv, config = {}) {
-    this._resetState();
-    const userArgs = normalizeArgv(argv, config.from);
-    this.rawArgs = [...userArgs];
-    await this._parseTokensAsync(userArgs);
+    try {
+      this._resetState();
+      const userArgs = normalizeArgv(argv, config.from);
+      this.rawArgs = [...userArgs];
+      await this._parseTokensAsync(userArgs);
+    } catch (error) {
+      throw this._formatRuntimeError(error);
+    }
     return this;
   }
 
@@ -171,19 +223,22 @@ export class Command {
         (option.defaultValue !== undefined ? ` (default: ${JSON.stringify(option.defaultValue)})` : "") +
         (option.required ? " (required)" : "")
     }));
-    rows.push({
-      term: "-h, --help",
-      description: "display help for command"
-    });
+    if (this._helpFlags) {
+      rows.push({
+        term: this._helpFlags,
+        description: this._helpDescription
+      });
+    }
     return rows;
   }
 
   _resetState() {
     this.args = [];
+    this.processedArgs = [];
     this.rawArgs = [];
     this._optionValues = {};
     for (const option of this._options) {
-      const value = cloneDefault(option);
+      const value = cloneDefaultValue(option);
       if (value !== undefined) {
         this._optionValues[option.name] = value;
       }
@@ -200,7 +255,7 @@ export class Command {
         positional.push(...tokens.slice(index + 1));
         break;
       }
-      if (token === "-h" || token === "--help") {
+      if (this._isHelpToken(token)) {
         this.outputHelp();
         return;
       }
@@ -238,7 +293,7 @@ export class Command {
         positional.push(...tokens.slice(index + 1));
         break;
       }
-      if (token === "-h" || token === "--help") {
+      if (this._isHelpToken(token)) {
         this.outputHelp();
         return;
       }
@@ -277,6 +332,15 @@ export class Command {
       throw new Error(this._unknownOptionMessage(token));
     }
 
+    if (option.negate) {
+      if (inlineValue !== undefined) {
+        throw new Error(`Option ${flagToken} does not take a value.`);
+      }
+      this._setOptionValue(option, false);
+      this._runOptionHandler(option.name);
+      return startIndex + 1;
+    }
+
     if (option.boolean) {
       if (inlineValue !== undefined) {
         throw new Error(`Option ${flagToken} does not take a value.`);
@@ -290,6 +354,10 @@ export class Command {
       this._setOptionValue(option, inlineValue);
       this._runOptionHandler(option.name);
       return startIndex + 1;
+    }
+
+    if (option.variadic) {
+      return this._consumeVariadicOption(option, tokens, startIndex, flagToken);
     }
 
     const next = tokens[startIndex + 1];
@@ -331,6 +399,10 @@ export class Command {
         return startIndex + 1;
       }
 
+      if (option.variadic) {
+        return this._consumeVariadicOption(option, tokens, startIndex, option.short);
+      }
+
       const next = tokens[startIndex + 1];
       if (next === undefined || isOptionToken(next)) {
         if (option.valueOptional) {
@@ -354,7 +426,36 @@ export class Command {
     if (handler) handler();
   }
 
-  _normalizeOptionConfig(parserOrDefaultValue, explicitDefaultValue) {
+  _consumeVariadicOption(option, tokens, startIndex, flagToken) {
+    const collectedValues = [];
+    let index = startIndex + 1;
+
+    while (index < tokens.length) {
+      const token = tokens[index];
+      if (token === "--" || isOptionToken(token)) {
+        break;
+      }
+      collectedValues.push(token);
+      index += 1;
+    }
+
+    if (collectedValues.length === 0) {
+      if (option.valueOptional) {
+        this._setOptionValue(option, true);
+        this._runOptionHandler(option.name);
+        return startIndex + 1;
+      }
+      throw new Error(`Option ${flagToken} expects a value.`);
+    }
+
+    for (const value of collectedValues) {
+      this._setOptionValue(option, value);
+    }
+    this._runOptionHandler(option.name);
+    return index;
+  }
+
+  _normalizeValueConfig(parserOrDefaultValue, explicitDefaultValue) {
     if (typeof parserOrDefaultValue === "function") {
       return {
         parser: parserOrDefaultValue,
@@ -371,6 +472,34 @@ export class Command {
   _setOptionValue(option, rawValue) {
     const previousValue = this._optionValues[option.name];
     this._optionValues[option.name] = option.parseValue(rawValue, previousValue);
+  }
+
+  _isHelpToken(token) {
+    if (!this._helpFlags) {
+      return false;
+    }
+    const helpOption = new OptionDefinition(this._helpFlags, this._helpDescription);
+    return helpOption.matches(token);
+  }
+
+  _formatRuntimeError(error) {
+    if (error?._formattedByCommand) {
+      return error;
+    }
+
+    const originalMessage = error instanceof Error ? error.message : String(error);
+    const formattedMessage = [`error: ${originalMessage}`];
+
+    if (this._showHelpAfterError) {
+      if (typeof this._showHelpAfterError === "string") {
+        formattedMessage.push(this._showHelpAfterError);
+      }
+      formattedMessage.push(this.helpInformation());
+    }
+
+    const formattedError = new Error(formattedMessage.join("\n\n"));
+    formattedError._formattedByCommand = true;
+    return formattedError;
   }
 
   _unknownOptionMessage(token) {
@@ -394,6 +523,7 @@ export class Command {
 
   _applyArguments(values) {
     this.args = [];
+    this.processedArgs = [];
     let index = 0;
 
     for (const definition of this._arguments) {
@@ -402,7 +532,20 @@ export class Command {
         if (definition.required && rest.length === 0) {
           throw new Error(`Missing required argument: ${definition.name}`);
         }
-        this.args.push(rest);
+
+        if (definition.parser) {
+          let processedValue = cloneDefaultValue(definition);
+          for (const item of rest) {
+            processedValue = definition.parseValue(item, processedValue);
+          }
+          if (processedValue === undefined) {
+            processedValue = [];
+          }
+          this.args.push(processedValue);
+        } else {
+          this.args.push(rest);
+        }
+
         index = values.length;
         continue;
       }
@@ -412,9 +555,10 @@ export class Command {
         if (definition.required) {
           throw new Error(`Missing required argument: ${definition.name}`);
         }
-        this.args.push(undefined);
+        this.args.push(cloneDefaultValue(definition));
       } else {
-        this.args.push(value);
+        const previousValue = cloneDefaultValue(definition);
+        this.args.push(definition.parseValue(value, previousValue));
         index += 1;
       }
     }
@@ -422,12 +566,21 @@ export class Command {
     if (index < values.length) {
       throw new Error(`Too many arguments: ${values.slice(index).join(" ")}`);
     }
+
+    this.processedArgs = [...this.args];
   }
 
   _validateRequiredOptions() {
     for (const option of this._options) {
       if (option.required && this._optionValues[option.name] === undefined) {
         throw new Error(`Missing required option: ${option.long ?? option.short}`);
+      }
+      if (
+        option.negate &&
+        this._optionValues[option.name] === undefined &&
+        !this._options.some((item) => item.name === option.name && item !== option && !item.negate)
+      ) {
+        this._optionValues[option.name] = true;
       }
     }
   }

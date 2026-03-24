@@ -8,20 +8,28 @@ A competition-oriented rewrite of [commander.js](https://github.com/tj/commander
 - The core feature set is concentrated around a few modules, which makes it practical to deliver a meaningful rewrite before the midterm checkpoint.
 - A staged rewrite makes progress easy to demonstrate: parser core, help system, tests, examples, and documentation.
 
-## Midterm scope
+## Current scope
 
-The current rewrite covers the main flow needed for common command-line tools:
+The current rewrite covers the main flow needed for common command-line tools and final-demo scenarios:
 
 - command registration
-- positional arguments
+- positional arguments and `.arguments()`
 - boolean and value options
+- negatable boolean options like `--no-color`
 - optional option values
+- variadic options like `--tag <name...>`
 - required options
 - subcommands
+- `.addCommand()` with preconfigured subcommands
 - command aliases
+- custom option value processing
+- custom argument value processing
 - async action handlers via `parseAsync()`
 - combined short flags like `-alh`
 - automatic help text
+- custom help flags via `.helpOption()`
+- formatted errors and `.showHelpAfterError()`
+- suggestion messages for unknown options and subcommands
 - action handlers
 - basic validation errors
 
@@ -45,9 +53,10 @@ tests/
 ## Quick start
 
 ```bash
-npm test
+node --test
 node examples/string-util.js split --separator=/ a/b/c
-node examples/release.js ship app.tar.gz -t abc123 --env=staging
+node examples/string-util.js split --list a b c
+node examples/release.js ship app.tar.gz build-17 -t abc123 --tag stable beta --no-color
 ```
 
 ## Rewrite mapping
@@ -57,15 +66,20 @@ This rewrite currently targets the following upstream capabilities:
 - `Command` object lifecycle
 - `.command()`
 - `.argument()`
+- `.arguments()`
+- `.addCommand()`
 - `.option()` / `.requiredOption()`
 - `.alias()`
+- custom option and argument processing
 - `.action()`
 - `.parse()` / `.parseAsync()`
 - generated help output
+- `.helpOption()`
+- `.showHelpAfterError()`
+- negatable and variadic options
 
 Planned next steps:
 
-- custom value processors
-- richer error formatting
+- default subcommands
 - standalone executable subcommands
-- suggestion and compatibility behaviors
+- richer compatibility behaviors around help and option inheritance

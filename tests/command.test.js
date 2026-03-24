@@ -33,6 +33,25 @@ test("supports subcommands with actions", () => {
   assert.deepEqual(result, ["a"]);
 });
 
+test("supports addCommand with preconfigured subcommands", () => {
+  let result = null;
+
+  const split = new Command("split")
+    .argument("<input>")
+    .option("--first", "first only")
+    .option("-s, --separator <char>", "separator", ",")
+    .action((input, options) => {
+      const limit = options.first ? 1 : undefined;
+      result = input.split(options.separator, limit);
+    });
+
+  const program = new Command().name("string-util").addCommand(split);
+
+  program.parse(["split", "--first", "-s", "/", "a/b/c"], { from: "user" });
+
+  assert.deepEqual(result, ["a"]);
+});
+
 test("supports command aliases", () => {
   let result = null;
   const program = new Command().name("string-util");
@@ -71,6 +90,32 @@ test("supports optional option values", () => {
   assert.deepEqual(program.opts(), { color: "always" });
 });
 
+test("supports negatable boolean options", () => {
+  const program = new Command().option("--no-color", "disable color");
+
+  program.parse([], { from: "user" });
+  assert.deepEqual(program.opts(), { color: true });
+
+  program.parse(["--no-color"], { from: "user" });
+  assert.deepEqual(program.opts(), { color: false });
+});
+
+test("supports variadic options", () => {
+  const program = new Command().option("-n, --number <value...>", "numbers");
+
+  program.parse(["-n", "1", "2", "3"], { from: "user" });
+
+  assert.deepEqual(program.opts(), { number: ["1", "2", "3"] });
+});
+
+test("accepts negative numbers as option values", () => {
+  const program = new Command().option("-t, --threshold <value>", "threshold");
+
+  program.parse(["--threshold", "-1"], { from: "user" });
+
+  assert.deepEqual(program.opts(), { threshold: "-1" });
+});
+
 test("supports combined short boolean options", () => {
   const program = new Command()
     .option("-a, --all", "all")
@@ -99,6 +144,69 @@ test("supports variadic arguments", () => {
   program.parse(["a.js", "b.js", "c.js"], { from: "user" });
 
   assert.deepEqual(program.args, [["a.js", "b.js", "c.js"]]);
+});
+
+test("supports declaring multiple arguments with arguments()", () => {
+  const program = new Command().arguments("<source> [destination]");
+
+  program.parse(["input.txt", "output.txt"], { from: "user" });
+
+  assert.deepEqual(program.args, ["input.txt", "output.txt"]);
+});
+
+test("supports variadic declarations with arguments()", () => {
+  const program = new Command().arguments("<command> <files...>");
+
+  program.parse(["build", "a.js", "b.js"], { from: "user" });
+
+  assert.deepEqual(program.args, ["build", ["a.js", "b.js"]]);
+});
+
+test("supports custom argument processing", () => {
+  const program = new Command().argument(
+    "<port>",
+    "port number",
+    (value) => {
+      const parsedValue = Number(value);
+      if (Number.isNaN(parsedValue)) {
+        throw new Error("Not a number.");
+      }
+      return parsedValue;
+    }
+  );
+
+  program.parse(["3000"], { from: "user" });
+
+  assert.deepEqual(program.args, [3000]);
+  assert.deepEqual(program.processedArgs, [3000]);
+});
+
+test("supports default values for optional arguments", () => {
+  const program = new Command().argument(
+    "[env]",
+    "target environment",
+    (value) => value.toUpperCase(),
+    "DEV"
+  );
+
+  program.parse([], { from: "user" });
+  assert.deepEqual(program.args, ["DEV"]);
+
+  program.parse(["prod"], { from: "user" });
+  assert.deepEqual(program.args, ["PROD"]);
+});
+
+test("supports variadic argument processing with accumulation", () => {
+  const program = new Command().argument(
+    "<number...>",
+    "numbers",
+    (value, previous = 0) => previous + Number(value),
+    0
+  );
+
+  program.parse(["2", "3", "4"], { from: "user" });
+
+  assert.deepEqual(program.args, [9]);
 });
 
 test("supports parseAsync with async action handlers", async () => {
@@ -152,7 +260,7 @@ test("throws for unknown options", () => {
 
   assert.throws(() => {
     program.parse(["--missing"], { from: "user" });
-  }, /Unknown option: --missing/);
+  }, /error: Unknown option: --missing/);
 });
 
 test("suggests similar options for unknown options", () => {
@@ -177,7 +285,7 @@ test("throws for missing required option", () => {
 
   assert.throws(() => {
     program.parse([], { from: "user" });
-  }, /Missing required option/);
+  }, /error: Missing required option/);
 });
 
 test("throws for missing required argument", () => {
@@ -185,7 +293,44 @@ test("throws for missing required argument", () => {
 
   assert.throws(() => {
     program.parse([], { from: "user" });
-  }, /Missing required argument/);
+  }, /error: Missing required argument/);
+});
+
+test("throws for invalid argument values", () => {
+  const program = new Command().argument("<port>", "port", (value) => {
+    const parsedValue = Number(value);
+    if (Number.isNaN(parsedValue)) {
+      throw new Error("Not a number.");
+    }
+    return parsedValue;
+  });
+
+  assert.throws(() => {
+    program.parse(["abc"], { from: "user" });
+  }, /error: Invalid value for argument port: Not a number\./);
+});
+
+test("supports custom help option flags", () => {
+  const program = new Command()
+    .name("demo")
+    .helpOption("-H, --HELP", "display custom help")
+    .option("--first", "first only");
+
+  const help = program.helpInformation();
+
+  assert.match(help, /-H, --HELP/);
+});
+
+test("shows help after errors when configured", () => {
+  const program = new Command()
+    .name("demo")
+    .description("Demo CLI")
+    .option("--first", "first only")
+    .showHelpAfterError();
+
+  assert.throws(() => {
+    program.parse(["--firts"], { from: "user" });
+  }, /Usage: demo \[options]/);
 });
 
 test("renders help information", () => {
