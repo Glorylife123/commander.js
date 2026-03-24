@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import path from "node:path";
+
 import { ArgumentDefinition } from "./argument.js";
 import { HelpRenderer } from "./help.js";
 import { OptionDefinition } from "./option.js";
@@ -54,6 +58,10 @@ export class Command {
     this._helpDescription = "display help for command";
     this._showHelpAfterError = false;
     this._isDefault = false;
+    this._executableDir = null;
+    this._executableFile = null;
+    this._isExternal = false;
+    this._scriptPath = null;
   }
 
   name(value) {
@@ -63,11 +71,25 @@ export class Command {
 
   description(value) {
     this._description = value;
+    if (this._isExternal && !this._summary) {
+      this._summary = value;
+    }
     return this;
   }
 
   summary(value) {
     this._summary = value;
+    return this;
+  }
+
+  executableDir(directory) {
+    this._executableDir = directory;
+    return this;
+  }
+
+  executableFile(file) {
+    this._executableFile = file;
+    this._isExternal = true;
     return this;
   }
 
@@ -115,6 +137,11 @@ export class Command {
     return this;
   }
 
+  addOption(option) {
+    this._options.push(option);
+    return this;
+  }
+
   requiredOption(flags, description = "", defaultValue) {
     const { parser, resolvedDefaultValue } = this._normalizeValueConfig(defaultValue, arguments[3]);
     this._options.push(
@@ -127,16 +154,23 @@ export class Command {
     return this;
   }
 
-  command(spec, config = {}) {
+  command(spec, descriptionOrConfig = {}, maybeConfig = {}) {
     const [name, ...argSpecs] = spec.trim().split(/\s+/);
     const command = new Command(name);
     command._parent = this;
     for (const argSpec of argSpecs) {
       command.argument(argSpec);
     }
+    const isExternal = typeof descriptionOrConfig === "string";
+    if (isExternal) {
+      command._summary = descriptionOrConfig;
+      command._isExternal = true;
+    }
+
+    const config = isExternal ? maybeConfig : descriptionOrConfig;
     this._applyCommandConfig(command, config);
     this._commands.push(command);
-    return command;
+    return isExternal ? this : command;
   }
 
   addCommand(command, config = {}) {
@@ -146,6 +180,11 @@ export class Command {
     command._parent = this;
     this._applyCommandConfig(command, config);
     this._commands.push(command);
+    return this;
+  }
+
+  addArgument(argument) {
+    this._arguments.push(argument);
     return this;
   }
 
@@ -172,6 +211,18 @@ export class Command {
     return { ...this._optionValues };
   }
 
+  optsWithGlobals() {
+    const chain = [];
+    let command = this;
+
+    while (command) {
+      chain.unshift(command);
+      command = command._parent;
+    }
+
+    return Object.assign({}, ...chain.map((item) => item.opts()));
+  }
+
   helpInformation() {
     return new HelpRenderer(this).render();
   }
@@ -184,6 +235,7 @@ export class Command {
   parse(argv, config = {}) {
     try {
       this._resetState();
+      this._scriptPath = this._resolveScriptPath(argv, config.from);
       const userArgs = normalizeArgv(argv, config.from);
       this.rawArgs = [...userArgs];
       this._parseTokensSync(userArgs);
@@ -196,6 +248,7 @@ export class Command {
   async parseAsync(argv, config = {}) {
     try {
       this._resetState();
+      this._scriptPath = this._resolveScriptPath(argv, config.from);
       const userArgs = normalizeArgv(argv, config.from);
       this.rawArgs = [...userArgs];
       await this._parseTokensAsync(userArgs);
@@ -223,6 +276,7 @@ export class Command {
       term: option.flags,
       description:
         option.description +
+        option.choicesDescription() +
         (option.defaultValue !== undefined ? ` (default: ${JSON.stringify(option.defaultValue)})` : "") +
         (option.required ? " (required)" : "")
     }));
@@ -273,7 +327,7 @@ export class Command {
         command._name === token || command._aliases.includes(token)
       );
       if (subcommand) {
-        subcommand.parse(tokens.slice(index + 1), { from: "user" });
+        this._dispatchSubcommandSync(subcommand, tokens.slice(index + 1));
         this.args = subcommand.args;
         return;
       }
@@ -321,7 +375,7 @@ export class Command {
         command._name === token || command._aliases.includes(token)
       );
       if (subcommand) {
-        await subcommand.parseAsync(tokens.slice(index + 1), { from: "user" });
+        await this._dispatchSubcommandAsync(subcommand, tokens.slice(index + 1));
         this.args = subcommand.args;
         return;
       }
@@ -351,17 +405,18 @@ export class Command {
       return this._consumeCombinedShortOptions(tokens, startIndex);
     }
     const [flagToken, inlineValue] = token.split(/=(.*)/s, 2);
-    const option = this._options.find((item) => item.matches(flagToken));
-    if (!option) {
+    const resolvedOption = this._findOption(flagToken);
+    if (!resolvedOption) {
       throw new Error(this._unknownOptionMessage(token));
     }
+    const { command, option } = resolvedOption;
 
     if (option.negate) {
       if (inlineValue !== undefined) {
         throw new Error(`Option ${flagToken} does not take a value.`);
       }
-      this._setOptionValue(option, false);
-      this._runOptionHandler(option.name);
+      command._setOptionValue(option, false);
+      command._runOptionHandler(option.name);
       return startIndex + 1;
     }
 
@@ -369,33 +424,33 @@ export class Command {
       if (inlineValue !== undefined) {
         throw new Error(`Option ${flagToken} does not take a value.`);
       }
-      this._setOptionValue(option, true);
-      this._runOptionHandler(option.name);
+      command._setOptionValue(option, true);
+      command._runOptionHandler(option.name);
       return startIndex + 1;
     }
 
     if (inlineValue !== undefined) {
-      this._setOptionValue(option, inlineValue);
-      this._runOptionHandler(option.name);
+      command._setOptionValue(option, inlineValue);
+      command._runOptionHandler(option.name);
       return startIndex + 1;
     }
 
     if (option.variadic) {
-      return this._consumeVariadicOption(option, tokens, startIndex, flagToken);
+      return this._consumeVariadicOption(command, option, tokens, startIndex, flagToken);
     }
 
     const next = tokens[startIndex + 1];
     if (next === undefined || isOptionToken(next)) {
       if (option.valueOptional) {
-        this._setOptionValue(option, true);
-        this._runOptionHandler(option.name);
+        command._setOptionValue(option, true);
+        command._runOptionHandler(option.name);
         return startIndex + 1;
       }
       throw new Error(`Option ${token} expects a value.`);
     }
 
-    this._setOptionValue(option, next);
-    this._runOptionHandler(option.name);
+    command._setOptionValue(option, next);
+    command._runOptionHandler(option.name);
     return startIndex + 2;
   }
 
@@ -405,40 +460,41 @@ export class Command {
 
     for (let index = 0; index < shortFlags.length; index += 1) {
       const shortFlag = shortFlags[index];
-      const option = this._options.find((item) => item.isShortFlag(shortFlag));
-      if (!option) {
+      const resolvedOption = this._findShortOption(shortFlag);
+      if (!resolvedOption) {
         throw new Error(this._unknownOptionMessage(`-${shortFlag}`));
       }
+      const { command, option } = resolvedOption;
 
       if (option.boolean) {
-        this._setOptionValue(option, true);
-        this._runOptionHandler(option.name);
+        command._setOptionValue(option, true);
+        command._runOptionHandler(option.name);
         continue;
       }
 
       const rest = shortFlags.slice(index + 1).join("");
       if (rest) {
-        this._setOptionValue(option, rest);
-        this._runOptionHandler(option.name);
+        command._setOptionValue(option, rest);
+        command._runOptionHandler(option.name);
         return startIndex + 1;
       }
 
       if (option.variadic) {
-        return this._consumeVariadicOption(option, tokens, startIndex, option.short);
+        return this._consumeVariadicOption(command, option, tokens, startIndex, option.short);
       }
 
       const next = tokens[startIndex + 1];
       if (next === undefined || isOptionToken(next)) {
         if (option.valueOptional) {
-          this._setOptionValue(option, true);
-          this._runOptionHandler(option.name);
+          command._setOptionValue(option, true);
+          command._runOptionHandler(option.name);
           return startIndex + 1;
         }
         throw new Error(`Option ${option.short} expects a value.`);
       }
 
-      this._setOptionValue(option, next);
-      this._runOptionHandler(option.name);
+      command._setOptionValue(option, next);
+      command._runOptionHandler(option.name);
       return startIndex + 2;
     }
 
@@ -453,6 +509,9 @@ export class Command {
   _applyCommandConfig(command, config) {
     if (config?.isDefault) {
       command._isDefault = true;
+    }
+    if (config?.executableFile) {
+      command.executableFile(config.executableFile);
     }
   }
 
@@ -493,7 +552,7 @@ export class Command {
     }
 
     const defaultCommand = this._defaultCommand();
-    defaultCommand.parse(positional, { from: "user" });
+    this._dispatchSubcommandSync(defaultCommand, positional);
     this.args = defaultCommand.args;
     return true;
   }
@@ -504,12 +563,30 @@ export class Command {
     }
 
     const defaultCommand = this._defaultCommand();
-    await defaultCommand.parseAsync(positional, { from: "user" });
+    await this._dispatchSubcommandAsync(defaultCommand, positional);
     this.args = defaultCommand.args;
     return true;
   }
 
-  _consumeVariadicOption(option, tokens, startIndex, flagToken) {
+  _dispatchSubcommandSync(subcommand, tokens) {
+    if (subcommand._isExternal) {
+      this._executeExternalSubcommandSync(subcommand, tokens);
+      return;
+    }
+
+    subcommand.parse(tokens, { from: "user" });
+  }
+
+  async _dispatchSubcommandAsync(subcommand, tokens) {
+    if (subcommand._isExternal) {
+      await this._executeExternalSubcommandAsync(subcommand, tokens);
+      return;
+    }
+
+    await subcommand.parseAsync(tokens, { from: "user" });
+  }
+
+  _consumeVariadicOption(ownerCommand, option, tokens, startIndex, flagToken) {
     const collectedValues = [];
     let index = startIndex + 1;
 
@@ -524,17 +601,17 @@ export class Command {
 
     if (collectedValues.length === 0) {
       if (option.valueOptional) {
-        this._setOptionValue(option, true);
-        this._runOptionHandler(option.name);
+        ownerCommand._setOptionValue(option, true);
+        ownerCommand._runOptionHandler(option.name);
         return startIndex + 1;
       }
       throw new Error(`Option ${flagToken} expects a value.`);
     }
 
     for (const value of collectedValues) {
-      this._setOptionValue(option, value);
+      ownerCommand._setOptionValue(option, value);
     }
-    this._runOptionHandler(option.name);
+    ownerCommand._runOptionHandler(option.name);
     return index;
   }
 
@@ -552,9 +629,170 @@ export class Command {
     };
   }
 
+  _resolveScriptPath(argv, from = "node") {
+    if (from === "node" && Array.isArray(argv) && argv.length >= 2) {
+      return argv[1];
+    }
+    if (from === "node" && process.argv.length >= 2) {
+      return process.argv[1];
+    }
+    return this._scriptPath;
+  }
+
   _setOptionValue(option, rawValue) {
     const previousValue = this._optionValues[option.name];
     this._optionValues[option.name] = option.parseValue(rawValue, previousValue);
+  }
+
+  _findOption(flagToken) {
+    let command = this;
+    while (command) {
+      const option = command._options.find((item) => item.matches(flagToken));
+      if (option) {
+        return { command, option };
+      }
+      command = command._parent;
+    }
+    return null;
+  }
+
+  _findShortOption(shortFlag) {
+    let command = this;
+    while (command) {
+      const option = command._options.find((item) => item.isShortFlag(shortFlag));
+      if (option) {
+        return { command, option };
+      }
+      command = command._parent;
+    }
+    return null;
+  }
+
+  _resolveExecutableDir() {
+    if (this._executableDir) {
+      return path.resolve(this._executableDir);
+    }
+
+    if (this._parent) {
+      return this._parent._resolveExecutableDir();
+    }
+
+    if (this._scriptPath) {
+      return path.dirname(path.resolve(this._scriptPath));
+    }
+
+    return process.cwd();
+  }
+
+  _resolveProgramBasename() {
+    if (this._parent) {
+      return this._parent._resolveProgramBasename();
+    }
+
+    if (this._name) {
+      return this._name;
+    }
+
+    if (this._scriptPath) {
+      return path.basename(this._scriptPath, path.extname(this._scriptPath));
+    }
+
+    return "program";
+  }
+
+  _resolveExecutablePath(subcommand) {
+    const executableDir = subcommand._resolveExecutableDir();
+    if (subcommand._executableFile) {
+      return path.isAbsolute(subcommand._executableFile)
+        ? subcommand._executableFile
+        : path.resolve(executableDir, subcommand._executableFile);
+    }
+
+    const baseName = `${subcommand._resolveProgramBasename()}-${subcommand._name}`;
+    const candidates = [
+      path.resolve(executableDir, baseName),
+      path.resolve(executableDir, `${baseName}.js`),
+      path.resolve(executableDir, `${baseName}.mjs`),
+      path.resolve(executableDir, `${baseName}.cjs`)
+    ];
+
+    const matchedPath = candidates.find((candidate) => existsSync(candidate));
+    if (!matchedPath) {
+      throw new Error(
+        `Cannot find executable for subcommand ${subcommand._name}. Expected one of ${candidates.join(", ")}.`
+      );
+    }
+
+    return matchedPath;
+  }
+
+  _buildExternalInvocation(subcommand, tokens) {
+    const executablePath = this._resolveExecutablePath(subcommand);
+    const extension = path.extname(executablePath).toLowerCase();
+
+    if ([".js", ".mjs", ".cjs"].includes(extension)) {
+      return {
+        command: process.execPath,
+        args: [executablePath, ...tokens]
+      };
+    }
+
+    return {
+      command: executablePath,
+      args: tokens
+    };
+  }
+
+  _executeExternalSubcommandSync(subcommand, tokens) {
+    const invocation = this._buildExternalInvocation(subcommand, tokens);
+    const result = spawnSync(invocation.command, invocation.args, {
+      cwd: process.cwd(),
+      env: process.env,
+      encoding: "utf8",
+      stdio: "pipe"
+    });
+
+    if (result.stdout) {
+      process.stdout.write(result.stdout);
+    }
+    if (result.stderr) {
+      process.stderr.write(result.stderr);
+    }
+
+    if (result.error) {
+      throw result.error;
+    }
+    if (result.status !== 0) {
+      throw new Error(`External command failed: ${subcommand._name} exited with code ${result.status}`);
+    }
+  }
+
+  _executeExternalSubcommandAsync(subcommand, tokens) {
+    const invocation = this._buildExternalInvocation(subcommand, tokens);
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ["inherit", "pipe", "pipe"]
+      });
+
+      child.stdout.on("data", (chunk) => {
+        process.stdout.write(chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        process.stderr.write(chunk);
+      });
+
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`External command failed: ${subcommand._name} exited with code ${code}`));
+      });
+    });
   }
 
   _isHelpToken(token) {
@@ -608,7 +846,14 @@ export class Command {
   }
 
   _unknownOptionMessage(token) {
-    const candidates = this._options.flatMap((option) => [option.short, option.long].filter(Boolean));
+    const candidates = [];
+    let command = this;
+
+    while (command) {
+      candidates.push(...command._options.flatMap((option) => [option.short, option.long].filter(Boolean)));
+      command = command._parent;
+    }
+
     const suggestion = suggestClosest(token, candidates);
     return suggestion
       ? `Unknown option: ${token} (Did you mean ${suggestion}?)`

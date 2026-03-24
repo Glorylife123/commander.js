@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { Command } from "../src/index.js";
+import { Argument, Command, Option } from "../src/index.js";
 
 test("parses boolean and value options", () => {
   const program = new Command()
@@ -66,6 +69,36 @@ test("supports addCommand with preconfigured subcommands", () => {
   program.parse(["split", "--first", "-s", "/", "a/b/c"], { from: "user" });
 
   assert.deepEqual(result, ["a"]);
+});
+
+test("supports standalone executable subcommands declared with command()", () => {
+  const workdir = mkdtempSync(path.join(os.tmpdir(), "mini-commander-"));
+  const outputFile = path.join(workdir, "ship.json");
+
+  const program = new Command()
+    .name("demo")
+    .executableDir(path.join(process.cwd(), "tests", "fixtures"));
+
+  program.command("ship <output>", "ship using an external executable");
+
+  program.parse(["ship", outputFile, "alpha", "beta"], { from: "user" });
+
+  assert.deepEqual(JSON.parse(readFileSync(outputFile, "utf8")), ["alpha", "beta"]);
+});
+
+test("supports standalone executable subcommands declared with addCommand()", () => {
+  const workdir = mkdtempSync(path.join(os.tmpdir(), "mini-commander-"));
+  const outputFile = path.join(workdir, "ship-custom.json");
+
+  const ship = new Command("ship")
+    .description("ship using a custom external executable")
+    .executableFile(path.join(process.cwd(), "tests", "fixtures", "demo-ship.js"));
+
+  const program = new Command().name("demo").addCommand(ship);
+
+  program.parse(["ship", outputFile, "stable"], { from: "user" });
+
+  assert.deepEqual(JSON.parse(readFileSync(outputFile, "utf8")), ["stable"]);
 });
 
 test("supports default subcommands declared with addCommand()", () => {
@@ -295,6 +328,32 @@ test("supports custom option processing with default accumulation", () => {
   assert.deepEqual(program.opts(), { number: 5 });
 });
 
+test("supports option choices with addOption()", () => {
+  const program = new Command().addOption(
+    new Option("-e, --env <name>", "target environment").choices(["dev", "staging", "prod"])
+  );
+
+  program.parse(["--env", "prod"], { from: "user" });
+  assert.deepEqual(program.opts(), { env: "prod" });
+
+  assert.throws(() => {
+    program.parse(["--env", "local"], { from: "user" });
+  }, /Allowed choices are "dev", "staging", "prod"/);
+});
+
+test("supports argument choices with addArgument()", () => {
+  const program = new Command().addArgument(
+    new Argument("<mode>", "execution mode").choices(["build", "test", "deploy"])
+  );
+
+  program.parse(["build"], { from: "user" });
+  assert.deepEqual(program.args, ["build"]);
+
+  assert.throws(() => {
+    program.parse(["watch"], { from: "user" });
+  }, /Allowed choices are "build", "test", "deploy"/);
+});
+
 test("preserves parent option values when dispatching to subcommands", () => {
   let subcommandOptions = null;
   const program = new Command().option("-v, --verbose", "verbose output");
@@ -310,6 +369,58 @@ test("preserves parent option values when dispatching to subcommands", () => {
 
   assert.deepEqual(program.opts(), { verbose: true });
   assert.deepEqual(subcommandOptions, { dryRun: true });
+});
+
+test("supports reading merged local and global options with optsWithGlobals()", () => {
+  let mergedOptions = null;
+  const program = new Command().option("-v, --verbose", "verbose output");
+
+  program
+    .command("run")
+    .option("--dry-run", "skip writes")
+    .action((options, command) => {
+      mergedOptions = command.optsWithGlobals();
+    });
+
+  program.parse(["--verbose", "run", "--dry-run"], { from: "user" });
+
+  assert.deepEqual(mergedOptions, { verbose: true, dryRun: true });
+});
+
+test("supports parsing parent options after the subcommand token", () => {
+  let mergedOptions = null;
+  const program = new Command().option("-v, --verbose", "verbose output");
+
+  program
+    .command("run")
+    .option("--dry-run", "skip writes")
+    .action((options, command) => {
+      mergedOptions = command.optsWithGlobals();
+    });
+
+  program.parse(["run", "--dry-run", "--verbose"], { from: "user" });
+
+  assert.deepEqual(program.opts(), { verbose: true });
+  assert.deepEqual(mergedOptions, { verbose: true, dryRun: true });
+});
+
+test("keeps opts() local when optsWithGlobals() is available", () => {
+  let localOptions = null;
+  let mergedOptions = null;
+  const program = new Command().option("--profile <name>", "profile");
+
+  program
+    .command("deploy")
+    .option("--region <name>", "region")
+    .action((options, command) => {
+      localOptions = command.opts();
+      mergedOptions = command.optsWithGlobals();
+    });
+
+  program.parse(["deploy", "--region", "ap-southeast", "--profile", "prod"], { from: "user" });
+
+  assert.deepEqual(localOptions, { region: "ap-southeast" });
+  assert.deepEqual(mergedOptions, { profile: "prod", region: "ap-southeast" });
 });
 
 test("throws for unknown options", () => {
@@ -376,6 +487,18 @@ test("supports custom help option flags", () => {
   const help = program.helpInformation();
 
   assert.match(help, /-H, --HELP/);
+});
+
+test("renders choices in help information", () => {
+  const program = new Command()
+    .name("demo")
+    .addOption(new Option("-e, --env <name>", "target environment").choices(["dev", "prod"]))
+    .addArgument(new Argument("<mode>", "execution mode").choices(["build", "deploy"]));
+
+  const help = program.helpInformation();
+
+  assert.match(help, /\(choices: "dev", "prod"\)/);
+  assert.match(help, /\(choices: "build", "deploy"\)/);
 });
 
 test("falls back to --help when -h is used by a custom option", () => {

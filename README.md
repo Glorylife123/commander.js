@@ -20,6 +20,7 @@ The current rewrite covers the main flow needed for common command-line tools an
 - variadic options like `--tag <name...>`
 - required options
 - subcommands
+- standalone executable subcommands
 - `.addCommand()` with preconfigured subcommands
 - command aliases
 - custom option value processing
@@ -45,6 +46,10 @@ src/
   utils.js
 examples/
   release.js
+  service-async-check.js
+  service-async.js
+  service-start.js
+  service.js
   string-util.js
 tests/
   command.test.js
@@ -57,6 +62,8 @@ node --test
 node examples/string-util.js split --separator=/ a/b/c
 node examples/string-util.js split --list a b c
 node examples/release.js ship app.tar.gz build-17 -t abc123 --tag stable beta --no-color
+node examples/service.js start api --port 3000 --tag blue green
+node examples/service-async.js check gateway --verbose
 ```
 
 ## Final defense entry
@@ -75,6 +82,8 @@ This rewrite currently targets the following upstream capabilities:
 - `.argument()`
 - `.arguments()`
 - `.addCommand()`
+- standalone executable subcommands via `.command("name", "description")`
+- `.executableDir()` / `.executableFile()`
 - `.option()` / `.requiredOption()`
 - `.alias()`
 - custom option and argument processing
@@ -88,5 +97,62 @@ This rewrite currently targets the following upstream capabilities:
 Planned next steps:
 
 - default subcommands
-- standalone executable subcommands
 - richer compatibility behaviors around help and option inheritance
+
+## Standalone executable subcommands
+
+This rewrite supports dispatching a subcommand to an external executable script.
+
+### Convention-based executable lookup
+
+If you declare a subcommand with a string description, it is treated as an external subcommand:
+
+```js
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { Command } from "./src/index.js";
+
+const exampleDir = path.dirname(fileURLToPath(import.meta.url));
+
+const program = new Command()
+  .name("service")
+  .executableDir(exampleDir);
+
+program.command("start <name>", "start a service with an external script");
+program.parse(process.argv);
+```
+
+The command above looks for one of these files inside `exampleDir`:
+
+- `service-start`
+- `service-start.js`
+- `service-start.mjs`
+- `service-start.cjs`
+
+### Explicit executable file
+
+You can also register a preconfigured command and point it to a specific file:
+
+```js
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { Command } from "./src/index.js";
+
+const exampleDir = path.dirname(fileURLToPath(import.meta.url));
+
+const status = new Command("status")
+  .description("check service status through an external script")
+  .executableFile(path.join(exampleDir, "service-async-check.js"));
+
+const program = new Command().name("service-async").addCommand(status);
+await program.parseAsync(process.argv);
+```
+
+### Runnable examples
+
+```bash
+node examples/service.js start api --port 3000 --tag blue green
+node examples/service-async.js check gateway --verbose
+```

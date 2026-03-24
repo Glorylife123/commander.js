@@ -11,6 +11,7 @@ Use a short set of commands to show that the project already behaves like a smal
 3. Show variadic options and negatable options
 4. Show help and error behavior
 5. Show default subcommand behavior
+6. Show standalone executable subcommands
 
 ## Demo commands
 
@@ -106,6 +107,26 @@ Talking point:
 
 - Even without explicitly typing the subcommand name, the framework can route to a default command.
 
+### 7. Show standalone executable subcommands
+
+```bash
+node examples/service.js start api --port 3000 --tag blue green
+node examples/service-async.js check gateway --verbose
+```
+
+Expected results:
+
+```json
+{"name":"api","port":"3000","tags":["blue","green"]}
+{"service":"gateway","status":"healthy","verbose":true}
+```
+
+Talking points:
+
+- `service.js` demonstrates convention-based external subcommand lookup through `.executableDir()`.
+- `service-async.js` demonstrates explicit executable registration through `.executableFile()`.
+- The second command also proves that external subcommands work in the `parseAsync()` flow.
+
 ## Suggested speaking outline
 
 ### Opening
@@ -121,7 +142,7 @@ Talking point:
 
 - parser completeness: options, arguments, subcommands, aliases, required values, variadic values
 - usability: help generation, suggestions, formatted errors, help-after-error
-- API improvements: `.arguments()`, `.addCommand()`, custom processors, default subcommands
+- API improvements: `.arguments()`, `.addCommand()`, custom processors, default subcommands, standalone executable subcommands
 
 ### Closing
 
@@ -139,4 +160,10 @@ node -e "import('./src/index.js').then(({Command})=>{const program=new Command()
 
 ```bash
 node -e "import('./src/index.js').then(({Command})=>{const program=new Command().argument('<port>','port',(value)=>Number(value)); program.parse(['3000'],{from:'user'}); console.log(JSON.stringify(program.args));})"
+```
+
+### Show standalone executable subcommand help entry
+
+```bash
+node examples/service.js --help
 ```

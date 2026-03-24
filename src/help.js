@@ -36,7 +36,7 @@ export class HelpRenderer {
           "Arguments",
           this.command._arguments.map((argument) => ({
             term: argument.name,
-            description: argument.description || ""
+            description: (argument.description || "") + argument.choicesDescription()
           }))
         )
       );
